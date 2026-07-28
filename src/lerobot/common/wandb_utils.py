@@ -160,44 +160,53 @@ class WandBLogger:
         self._wandb.log_artifact(artifact)
 
     def log_dict(
-        self, d: dict, step: int | None = None, mode: str = "train", custom_step_key: str | None = None
-    ):
-        if mode not in {"train", "eval"}:
-            raise ValueError(mode)
-        if step is None and custom_step_key is None:
-            raise ValueError("Either step or custom_step_key must be provided.")
-
-        # NOTE: This is not simple. Wandb step must always monotonically increase and it
-        # increases with each wandb.log call, but in the case of asynchronous RL for example,
-        # multiple time steps is possible. For example, the interaction step with the environment,
-        # the training step, the evaluation step, etc. So we need to define a custom step key
-        # to log the correct step for each metric.
-        if custom_step_key is not None:
-            if self._wandb_custom_step_key is None:
-                self._wandb_custom_step_key = set()
-            new_custom_key = f"{mode}/{custom_step_key}"
-            if new_custom_key not in self._wandb_custom_step_key:
-                self._wandb_custom_step_key.add(new_custom_key)
-                self._wandb.define_metric(new_custom_key, hidden=True)
-
-        for k, v in d.items():
-            if not isinstance(v, (int | float | str)):
-                logging.warning(
-                    f'WandB logging of key "{k}" was ignored as its type "{type(v)}" is not handled by this wrapper.'
-                )
-                continue
-
-            # Do not log the custom step key itself.
-            if self._wandb_custom_step_key is not None and k in self._wandb_custom_step_key:
-                continue
+            self, d: dict, step: int | None = None, mode: str = "train", custom_step_key: str | None = None
+        ):
+            if mode not in {"train", "eval"}:
+                raise ValueError(mode)
+            if step is None and custom_step_key is None:
+                raise ValueError("Either step or custom_step_key must be provided.")
 
             if custom_step_key is not None:
-                value_custom_step = d[custom_step_key]
-                data = {f"{mode}/{k}": v, f"{mode}/{custom_step_key}": value_custom_step}
-                self._wandb.log(data)
-                continue
+                if self._wandb_custom_step_key is None:
+                    self._wandb_custom_step_key = set()
+                new_custom_key = f"{mode}/{custom_step_key}"
+                if new_custom_key not in self._wandb_custom_step_key:
+                    self._wandb_custom_step_key.add(new_custom_key)
+                    self._wandb.define_metric(new_custom_key, hidden=True)
 
-            self._wandb.log(data={f"{mode}/{k}": v}, step=step)
+            # 🟢 核心改动：预处理字典，把类似 loss_per_dim 的 list 拆解展开
+            processed_d = {}
+            for k, v in d.items():
+                if isinstance(v, (list | tuple)):
+                    # 把 [0.1, 0.2, 0.3] 展开成 {'loss_per_dim_0': 0.1, 'loss_per_dim_1': 0.2, ...}
+                    for i, val in enumerate(v):
+                        if isinstance(val, (int | float)):
+                            processed_d[f"{k}_{i}"] = val
+                else:
+                    processed_d[k] = v
+
+            log_data = {}
+            for k, v in processed_d.items():
+                if not isinstance(v, (int | float | str)):
+                    logging.warning(
+                        f'WandB logging of key "{k}" was ignored as its type "{type(v)}" is not handled by this wrapper.'
+                    )
+                    continue
+
+                if self._wandb_custom_step_key is not None and k in self._wandb_custom_step_key:
+                    continue
+
+                if custom_step_key is not None:
+                    value_custom_step = processed_d[custom_step_key]
+                    data = {f"{mode}/{k}": v, f"{mode}/{custom_step_key}": value_custom_step}
+                    self._wandb.log(data)
+                    continue
+
+                log_data[f"{mode}/{k}"] = v
+
+            if log_data:
+                self._wandb.log(data=log_data, step=step)
 
     def log_video(self, video_path: str, step: int, mode: str = "train"):
         if mode not in {"train", "eval"}:

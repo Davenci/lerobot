@@ -29,8 +29,10 @@ from lerobot.configs import FeatureType, PreTrainedConfig
 from lerobot.envs import EnvConfig, env_to_policy_features
 from lerobot.processor import (
     AbsoluteActionsProcessorStep,
+    NormalizerProcessorStep,
     PolicyProcessorPipeline,
     RelativeActionsProcessorStep,
+    UnnormalizerProcessorStep,
     batch_to_transition,
     policy_action_to_transition,
     transition_to_batch,
@@ -79,6 +81,50 @@ def _reconnect_relative_absolute_steps(
     for step in postprocessor.steps:
         if isinstance(step, AbsoluteActionsProcessorStep) and step.relative_step is None:
             step.relative_step = relative_step
+
+
+def _ensure_relative_actions(
+    preprocessor: PolicyProcessorPipeline, postprocessor: PolicyProcessorPipeline, policy_cfg
+) -> None:
+    """Enable or inject relative-action processor steps after loading a checkpoint."""
+    if not getattr(policy_cfg, "use_relative_actions", False):
+        return
+
+    exclude_joints = list(getattr(policy_cfg, "relative_exclude_joints", []) or [])
+    action_names = getattr(policy_cfg, "action_feature_names", None)
+
+    pre_steps = list(preprocessor.steps)
+    relative_step = next((step for step in pre_steps if isinstance(step, RelativeActionsProcessorStep)), None)
+    if relative_step is None:
+        relative_step = RelativeActionsProcessorStep(
+            enabled=True,
+            exclude_joints=exclude_joints,
+            action_names=action_names,
+        )
+        normalizer_index = next(
+            (index for index, step in enumerate(pre_steps) if isinstance(step, NormalizerProcessorStep)),
+            0,
+        )
+        pre_steps.insert(normalizer_index, relative_step)
+        preprocessor.steps = pre_steps
+    else:
+        relative_step.enabled = True
+        relative_step.exclude_joints = exclude_joints
+        relative_step.action_names = action_names
+
+    post_steps = list(postprocessor.steps)
+    absolute_step = next((step for step in post_steps if isinstance(step, AbsoluteActionsProcessorStep)), None)
+    if absolute_step is None:
+        absolute_step = AbsoluteActionsProcessorStep(enabled=True, relative_step=relative_step)
+        unnormalizer_index = next(
+            (index for index, step in enumerate(post_steps) if isinstance(step, UnnormalizerProcessorStep)),
+            -1,
+        )
+        post_steps.insert(unnormalizer_index + 1, absolute_step)
+        postprocessor.steps = post_steps
+    else:
+        absolute_step.enabled = True
+        absolute_step.relative_step = relative_step
 
 
 def get_policy_class(name: str) -> type[PreTrainedPolicy]:
@@ -301,12 +347,18 @@ def make_pre_post_processors(
             kwargs["preprocessor_overrides"] = preprocessor_overrides
             kwargs["postprocessor_overrides"] = postprocessor_overrides
 
+        # Relative-action overrides can only configure saved steps. Remove them here
+        # and inject missing steps after loading old checkpoint processor configs.
+        pre_overrides = dict(kwargs.get("preprocessor_overrides") or {})
+        post_overrides = dict(kwargs.get("postprocessor_overrides") or {})
+        pre_overrides.pop("relative_actions_processor", None)
+        post_overrides.pop("absolute_actions_processor", None)
         preprocessor = PolicyProcessorPipeline.from_pretrained(
             pretrained_model_name_or_path=pretrained_path,
             config_filename=kwargs.get(
                 "preprocessor_config_filename", f"{POLICY_PREPROCESSOR_DEFAULT_NAME}.json"
             ),
-            overrides=kwargs.get("preprocessor_overrides", {}),
+            overrides=pre_overrides,
             to_transition=batch_to_transition,
             to_output=transition_to_batch,
         )
@@ -315,10 +367,11 @@ def make_pre_post_processors(
             config_filename=kwargs.get(
                 "postprocessor_config_filename", f"{POLICY_POSTPROCESSOR_DEFAULT_NAME}.json"
             ),
-            overrides=kwargs.get("postprocessor_overrides", {}),
+            overrides=post_overrides,
             to_transition=policy_action_to_transition,
             to_output=transition_to_policy_action,
         )
+        _ensure_relative_actions(preprocessor, postprocessor, policy_cfg)
         _reconnect_relative_absolute_steps(preprocessor, postprocessor)
         return preprocessor, postprocessor
 

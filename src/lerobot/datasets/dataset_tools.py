@@ -261,6 +261,7 @@ def merge_datasets(
     datasets: list[LeRobotDataset],
     output_repo_id: str,
     output_dir: str | Path | None = None,
+    video_files_size_in_mb: int | None = None,
 ) -> LeRobotDataset:
     """Merge multiple LeRobotDatasets into a single dataset.
 
@@ -270,6 +271,7 @@ def merge_datasets(
         datasets: List of LeRobotDatasets to merge.
         output_repo_id: Merged dataset identifier.
         output_dir: Root directory where the merged dataset will be stored. If not specified, defaults to $HF_LEROBOT_HOME/output_repo_id.
+        video_files_size_in_mb: Maximum size for video files in MB. Use a small value (e.g., 1) to force one file per source dataset and skip concatenation.
     """
     if not datasets:
         raise ValueError("No datasets to merge")
@@ -284,6 +286,7 @@ def merge_datasets(
         aggr_repo_id=output_repo_id,
         roots=roots,
         aggr_root=output_dir,
+        video_files_size_in_mb=video_files_size_in_mb,
     )
 
     merged_dataset = LeRobotDataset(

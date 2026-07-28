@@ -77,6 +77,9 @@ class DatasetReader:
         self._image_transforms = image_transforms
         self._return_uint8 = return_uint8
 
+        # Persistent thread pool for multi-camera parallel video decoding
+        self._video_thread_pool: ThreadPoolExecutor | None = None
+
         self.hf_dataset: datasets.Dataset | None = None
         self._absolute_to_relative_idx: dict[int, int] | None = None
 
@@ -256,10 +259,11 @@ class DatasetReader:
         if len(items) <= 1:
             return {vid_key: _decode_single(vid_key, query_ts)[1] for vid_key, query_ts in items}
 
-        # Multi-camera: decode in parallel (video decoding releases the GIL)
-        with ThreadPoolExecutor(max_workers=len(items)) as pool:
-            futures = [pool.submit(_decode_single, k, ts) for k, ts in items]
-            return dict(f.result() for f in futures)
+        # Multi-camera: decode in parallel using persistent thread pool
+        if self._video_thread_pool is None:
+            self._video_thread_pool = ThreadPoolExecutor(max_workers=len(items))
+        futures = [self._video_thread_pool.submit(_decode_single, k, ts) for k, ts in items]
+        return dict(f.result() for f in futures)
 
     def get_item(self, idx) -> dict:
         """Core __getitem__ logic. Assumes hf_dataset is loaded.
