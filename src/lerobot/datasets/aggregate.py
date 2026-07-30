@@ -21,6 +21,7 @@ import shutil
 from pathlib import Path
 
 import datasets
+import numpy as np
 import pandas as pd
 import tqdm
 
@@ -284,6 +285,7 @@ def aggregate_datasets(
     roots: list[Path] | None = None,
     aggr_root: Path | None = None,
     data_files_size_in_mb: int | None = None,
+    meta_files_size_in_mb: int | None = None,
     video_files_size_in_mb: int | None = None,
     chunk_size: int | None = None,
 ):
@@ -301,6 +303,7 @@ def aggregate_datasets(
         roots: Optional list of root paths for the source datasets.
         aggr_root: Optional root path for the aggregated dataset.
         data_files_size_in_mb: Maximum size for data files in MB (defaults to DEFAULT_DATA_FILE_SIZE_IN_MB)
+        meta_files_size_in_mb: Maximum size for episode metadata files in MB (defaults to DEFAULT_DATA_FILE_SIZE_IN_MB)
         video_files_size_in_mb: Maximum size for video files in MB (defaults to DEFAULT_VIDEO_FILE_SIZE_IN_MB)
         chunk_size: Maximum number of files per chunk (defaults to DEFAULT_CHUNK_SIZE)
     """
@@ -308,6 +311,8 @@ def aggregate_datasets(
 
     if data_files_size_in_mb is None:
         data_files_size_in_mb = DEFAULT_DATA_FILE_SIZE_IN_MB
+    if meta_files_size_in_mb is None:
+        meta_files_size_in_mb = DEFAULT_DATA_FILE_SIZE_IN_MB
     if video_files_size_in_mb is None:
         video_files_size_in_mb = DEFAULT_VIDEO_FILE_SIZE_IN_MB
     if chunk_size is None:
@@ -354,7 +359,14 @@ def aggregate_datasets(
         videos_idx = aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chunk_size)
         data_idx = aggregate_data(src_meta, dst_meta, data_idx, data_files_size_in_mb, chunk_size)
 
-        meta_idx = aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx)
+        meta_idx = aggregate_metadata(
+            src_meta,
+            dst_meta,
+            meta_idx,
+            data_idx,
+            videos_idx,
+            meta_files_size_in_mb,
+        )
 
         # Clear the src_to_dst mapping after processing each source dataset
         # to avoid interference between different source datasets
@@ -549,7 +561,7 @@ def aggregate_data(src_meta, dst_meta, data_idx, data_files_size_in_mb, chunk_si
     return data_idx
 
 
-def aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx):
+def aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx, meta_files_size_in_mb):
     """Aggregates metadata from a source dataset into the destination dataset.
 
     Reads source metadata files, updates all indices and timestamps,
@@ -578,6 +590,15 @@ def aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx):
     for chunk_idx, file_idx in chunk_file_ids:
         src_path = src_meta.root / DEFAULT_EPISODES_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
         df = pd.read_parquet(src_path)
+        # Older datasets stored scalar episode stats while newer datasets use
+        # one-dimensional arrays. Normalize both representations before
+        # writing multiple episode parquet files with one shared schema.
+        for column in [column for column in df.columns if column.startswith("stats/")]:
+            df[column] = df[column].map(
+                lambda value: np.asarray([value])
+                if np.isscalar(value) and not pd.isna(value)
+                else value
+            )
         df = update_meta_data(
             df,
             dst_meta,
@@ -590,7 +611,7 @@ def aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx):
             df,
             src_path,
             meta_idx,
-            DEFAULT_DATA_FILE_SIZE_IN_MB,
+            meta_files_size_in_mb,
             DEFAULT_CHUNK_SIZE,
             DEFAULT_EPISODES_PATH,
             contains_images=False,
