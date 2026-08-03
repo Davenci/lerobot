@@ -599,6 +599,22 @@ def aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx, meta_
                 if np.isscalar(value) and not pd.isna(value)
                 else value
             )
+
+        # Metadata rows must reference the file they are about to be written
+        # to. A source metadata file can be appended to an existing output
+        # file, so offsetting its original file index is not sufficient.
+        target_meta_idx = dict(meta_idx)
+        target_path = dst_meta.root / DEFAULT_EPISODES_PATH.format(
+            chunk_index=target_meta_idx["chunk"], file_index=target_meta_idx["file"]
+        )
+        if target_path.exists() and (
+            get_parquet_file_size_in_mb(target_path) + get_parquet_file_size_in_mb(src_path)
+            >= meta_files_size_in_mb
+        ):
+            target_meta_idx["chunk"], target_meta_idx["file"] = update_chunk_file_indices(
+                target_meta_idx["chunk"], target_meta_idx["file"], DEFAULT_CHUNK_SIZE
+            )
+
         df = update_meta_data(
             df,
             dst_meta,
@@ -606,8 +622,10 @@ def aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx, meta_
             data_idx,
             videos_idx,
         )
+        df["meta/episodes/chunk_index"] = target_meta_idx["chunk"]
+        df["meta/episodes/file_index"] = target_meta_idx["file"]
 
-        meta_idx, _ = append_or_create_parquet_file(
+        meta_idx, written_meta_idx = append_or_create_parquet_file(
             df,
             src_path,
             meta_idx,
@@ -617,6 +635,10 @@ def aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx, meta_
             contains_images=False,
             aggr_root=dst_meta.root,
         )
+        if written_meta_idx != (target_meta_idx["chunk"], target_meta_idx["file"]):
+            raise RuntimeError(
+                "Metadata file rotation changed while writing; refusing to create invalid episode references."
+            )
 
     # Increment latest_duration by the total duration added from this source dataset
     for k in videos_idx:

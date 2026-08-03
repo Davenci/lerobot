@@ -911,6 +911,43 @@ def _copy_and_reindex_episodes_metadata(
         }
         episode_dict.update(episode_meta)
         episode_dict.update(flatten_dict({"stats": episode_stats}))
+
+        # Some legacy depth streams store episode stats as a mixture of nulls,
+        # scalars, and three-channel arrays. Parquet needs one stable schema
+        # across the buffered episode metadata rows.
+        for stat_key, stat_value in list(episode_dict.items()):
+            if not stat_key.startswith("stats/") or "_depth/" not in stat_key:
+                continue
+            if stat_key.endswith("/count"):
+                if stat_value is None:
+                    episode_dict[stat_key] = np.asarray([0.0], dtype=np.float64)
+                else:
+                    episode_dict[stat_key] = np.asarray(stat_value, dtype=np.float64).reshape(-1)
+                continue
+
+            if stat_value is None:
+                episode_dict[stat_key] = np.full((3, 1, 1), np.nan, dtype=np.float64)
+            elif np.isscalar(stat_value):
+                episode_dict[stat_key] = np.full((3, 1, 1), stat_value, dtype=np.float64)
+            else:
+                values = np.asarray(stat_value, dtype=np.float64)
+                if values.shape == (3,):
+                    values = values.reshape(3, 1, 1)
+                if values.shape != (3, 1, 1):
+                    raise ValueError(f"Unexpected depth stats shape for {stat_key}: {values.shape}")
+                episode_dict[stat_key] = values
+
+        # Older recordings can omit all statistics for a depth stream in an
+        # episode.  The Parquet metadata writer buffers multiple episodes and
+        # requires every column to have exactly one value per buffered row.
+        # Fill absent depth-stat columns with the same stable schema used above.
+        for feature_name in src_dataset.meta.features:
+            if "_depth" not in feature_name:
+                continue
+            for stat_name in ("min", "max", "mean", "std"):
+                stat_key = f"stats/{feature_name}/{stat_name}"
+                episode_dict.setdefault(stat_key, np.full((3, 1, 1), np.nan, dtype=np.float64))
+            episode_dict.setdefault(f"stats/{feature_name}/count", np.asarray([0.0], dtype=np.float64))
         dst_meta._save_episode_metadata(episode_dict)
 
         total_frames += src_episode["length"]

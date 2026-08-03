@@ -120,13 +120,20 @@ class LeRobotDatasetMetadata:
         if not hasattr(self, "_metadata_buffer") or len(self._metadata_buffer) == 0:
             return
 
-        combined_dict = {}
+        # A rewritten dataset can combine metadata rows from legacy parquet
+        # shards with different optional stats columns.  Build every column
+        # across the complete buffer, using null for rows where it was absent;
+        # PyArrow requires each column to contain one value per episode row.
+        all_keys = set().union(*(episode_dict.keys() for episode_dict in self._metadata_buffer))
+        combined_dict = {key: [] for key in all_keys}
         for episode_dict in self._metadata_buffer:
-            for key, value in episode_dict.items():
-                if key not in combined_dict:
-                    combined_dict[key] = []
-                # Extract value and serialize numpy arrays
-                # because PyArrow's from_pydict function doesn't support numpy arrays
+            for key in all_keys:
+                value = episode_dict.get(key)
+                if value is None:
+                    combined_dict[key].append(None)
+                    continue
+                # Extract value and serialize numpy arrays because PyArrow's
+                # from_pydict function doesn't support numpy arrays directly.
                 val = value[0] if isinstance(value, list) else value
                 combined_dict[key].append(val.tolist() if isinstance(val, np.ndarray) else val)
 
