@@ -124,7 +124,7 @@ class LeRobotDatasetMetadata:
         # shards with different optional stats columns.  Build every column
         # across the complete buffer, using null for rows where it was absent;
         # PyArrow requires each column to contain one value per episode row.
-        all_keys = set().union(*(episode_dict.keys() for episode_dict in self._metadata_buffer))
+        all_keys = sorted(set().union(*(episode_dict.keys() for episode_dict in self._metadata_buffer)))
         combined_dict = {key: [] for key in all_keys}
         for episode_dict in self._metadata_buffer:
             for key in all_keys:
@@ -149,6 +149,8 @@ class LeRobotDatasetMetadata:
             self._pq_writer = pq.ParquetWriter(
                 path, schema=table.schema, compression="snappy", use_dictionary=True
             )
+        elif table.schema != self._pq_writer.schema:
+            table = table.cast(self._pq_writer.schema, safe=False)
 
         self._pq_writer.write_table(table)
 

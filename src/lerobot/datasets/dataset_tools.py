@@ -71,6 +71,9 @@ from .video_utils import (
 )
 
 
+_EPISODE_PARQUET_CACHE: dict[str, pd.DataFrame] = {}
+
+
 def _load_episode_with_stats(src_dataset: LeRobotDataset, episode_idx: int) -> dict:
     """Load a single episode's metadata including stats from parquet file.
 
@@ -86,7 +89,11 @@ def _load_episode_with_stats(src_dataset: LeRobotDataset, episode_idx: int) -> d
     file_idx = ep_meta["meta/episodes/file_index"]
 
     parquet_path = src_dataset.root / DEFAULT_EPISODES_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
-    df = pd.read_parquet(parquet_path)
+    cache_key = str(parquet_path)
+    df = _EPISODE_PARQUET_CACHE.get(cache_key)
+    if df is None:
+        df = pd.read_parquet(parquet_path)
+        _EPISODE_PARQUET_CACHE[cache_key] = df
 
     episode_row = df[df["episode_index"] == episode_idx].iloc[0]
 
@@ -856,6 +863,11 @@ def _copy_and_reindex_episodes_metadata(
 
     all_stats = []
     total_frames = 0
+    depth_stat_keys = set()
+    for old_idx in episode_mapping:
+        for key in _load_episode_with_stats(src_dataset, old_idx):
+            if key.startswith("stats/") and "_depth/" in key:
+                depth_stat_keys.add(key)
 
     for old_idx, new_idx in tqdm(
         sorted(episode_mapping.items(), key=lambda x: x[1]), desc="Processing episodes metadata"
@@ -902,6 +914,13 @@ def _copy_and_reindex_episodes_metadata(
 
                     episode_stats[feature_name][stat_name] = value
 
+        # Legacy depth statistics are metadata-only columns and are not
+        # declared features; exclude them from aggregate_stats validation.
+        episode_stats = {
+            feature_name: values
+            for feature_name, values in episode_stats.items()
+            if feature_name in src_dataset.meta.features
+        }
         all_stats.append(episode_stats)
 
         episode_dict = {
@@ -930,7 +949,27 @@ def _copy_and_reindex_episodes_metadata(
             elif np.isscalar(stat_value):
                 episode_dict[stat_key] = np.full((3, 1, 1), stat_value, dtype=np.float64)
             else:
-                values = np.asarray(stat_value, dtype=np.float64)
+                # Legacy parquet rows may deserialize channel values as nested
+                # object arrays, e.g. [array([array([0.])]), ...]. Extract
+                # one scalar per channel before restoring the stable shape.
+                try:
+                    values = np.asarray(stat_value, dtype=np.float64)
+                except (TypeError, ValueError):
+                    object_values = np.asarray(stat_value, dtype=object).reshape(-1)
+                    scalars = []
+                    for item in object_values:
+                        while isinstance(item, np.ndarray):
+                            if item.size != 1:
+                                break
+                            item = item.reshape(-1)[0]
+                        if isinstance(item, np.ndarray) or not np.isscalar(item):
+                            raise ValueError(
+                                f"Unexpected nested depth stats value for {stat_key}: {stat_value!r}"
+                            )
+                        scalars.append(float(item))
+                    values = np.asarray(scalars, dtype=np.float64)
+                if values.size == 1:
+                    values = np.full((3,), values.reshape(-1)[0], dtype=np.float64)
                 if values.shape == (3,):
                     values = values.reshape(3, 1, 1)
                 if values.shape != (3, 1, 1):
@@ -941,13 +980,11 @@ def _copy_and_reindex_episodes_metadata(
         # episode.  The Parquet metadata writer buffers multiple episodes and
         # requires every column to have exactly one value per buffered row.
         # Fill absent depth-stat columns with the same stable schema used above.
-        for feature_name in src_dataset.meta.features:
-            if "_depth" not in feature_name:
-                continue
-            for stat_name in ("min", "max", "mean", "std"):
-                stat_key = f"stats/{feature_name}/{stat_name}"
+        for stat_key in depth_stat_keys:
+            if stat_key.endswith("/count"):
+                episode_dict.setdefault(stat_key, np.asarray([0.0], dtype=np.float64))
+            else:
                 episode_dict.setdefault(stat_key, np.full((3, 1, 1), np.nan, dtype=np.float64))
-            episode_dict.setdefault(f"stats/{feature_name}/count", np.asarray([0.0], dtype=np.float64))
         dst_meta._save_episode_metadata(episode_dict)
 
         total_frames += src_episode["length"]
