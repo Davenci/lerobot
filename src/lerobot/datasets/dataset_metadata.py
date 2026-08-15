@@ -109,6 +109,12 @@ class LeRobotDatasetMetadata:
                 raise FileNotFoundError
             self._load_metadata()
         except (FileNotFoundError, NotADirectoryError):
+            # An explicit root is a local-dataset contract. Do not turn a
+            # missing local metadata file into an unrelated Hub request (and
+            # possible 401); report the local path to the caller instead.
+            if self._requested_root is not None:
+                raise
+
             if is_valid_version(self.revision):
                 self.revision = get_safe_version(self.repo_id, self.revision)
 
